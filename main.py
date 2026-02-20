@@ -192,6 +192,12 @@ if __name__ == "__main__":
         tokenizer = SimpleTokenizer(' '.join(texts))
         print("Vocabulary size is", tokenizer.vocab_size)
 
+        # Patch: Wrap tokenizer.encode to always add <cls> for part 3
+        orig_encode = tokenizer.encode
+        def encode_with_cls(text, add_cls=False):
+            return orig_encode(text, add_cls=True)
+        tokenizer.encode = encode_with_cls
+
         train_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/train_CLS.tsv")
         train_CLS_loader  = DataLoader(train_CLS_dataset, batch_size=batch_size,
                                        collate_fn=collate_batch, shuffle=True)
