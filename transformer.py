@@ -58,41 +58,53 @@ n_embd = 64  # Embedding dimension
 n_head = 2   # Number of attention heads
 n_layer = 4  # Number of transformer layers
 
+class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.attn_weights = None
+
+	def forward(self, src, src_mask=None, src_key_padding_mask=None):
+		# src: (batch, seq, d_model)
+		src2, attn_weights = self.self_attn(src, src, src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, need_weights=True, average_attn_weights=False)
+		self.attn_weights = attn_weights  # (batch, num_heads, seq, seq)
+		src = src + self.dropout1(src2)
+		src = self.norm1(src)
+		src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+		src = src + self.dropout2(src2)
+		src = self.norm2(src)
+		return src
+
 class TransformerEncoder(nn.Module):
 	def __init__(self, vocab_size, n_embd=n_embd, n_head=n_head, n_layer=n_layer, max_seq_len=32):
 		super().__init__()
 		self.token_emb = nn.Embedding(vocab_size, n_embd)
 		self.pos_emb = nn.Embedding(max_seq_len, n_embd)
-		encoder_layer = nn.TransformerEncoderLayer(
-			d_model=n_embd,
-			nhead=n_head,
-			dim_feedforward=4 * n_embd,
-			activation='gelu',
-			batch_first=True
-		)
-		self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layer)
+		encoder_layers = nn.ModuleList([
+			CustomTransformerEncoderLayer(
+				d_model=n_embd,
+				nhead=n_head,
+				dim_feedforward=4 * n_embd,
+				activation='gelu',
+				batch_first=True
+			) for _ in range(n_layer)
+		])
+		self.encoder_layers = encoder_layers
 		self.n_embd = n_embd
 		self.max_seq_len = max_seq_len
 
-		# Register hooks to capture attention weights
-		self.attn_maps = []
-		def hook(module, input, output):
-			if hasattr(module, 'self_attn'):
-				attn_output, attn_weights = module.self_attn(output, output, output)
-				self.attn_maps.append(attn_weights.detach())
-		for layer in self.transformer_encoder.layers:
-			layer.register_forward_hook(hook)
-
 	def forward(self, x):
 		# x: (batch_size, seq_len)
-		self.attn_maps = []  # Clear previous attention maps
+		attn_maps = []
 		batch_size, seq_len = x.size()
 		positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0).expand(batch_size, seq_len)
 		tok_emb = self.token_emb(x)  # (batch_size, seq_len, n_embd)
 		pos_emb = self.pos_emb(positions)  # (batch_size, seq_len, n_embd)
 		h = tok_emb + pos_emb
-		out = self.transformer_encoder(h)  # (batch_size, seq_len, n_embd)
-		return out, self.attn_maps
+		for layer in self.encoder_layers:
+			h = layer(h)
+			if hasattr(layer, 'attn_weights') and layer.attn_weights is not None:
+				attn_maps.append(layer.attn_weights.detach().cpu())
+		return h, attn_maps
 
 	def mean_pool(self, x, mask=None):
 		# x: (batch_size, seq_len, n_embd)

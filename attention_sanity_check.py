@@ -22,20 +22,11 @@ if __name__ == "__main__":
             super().__init__()
             self.encoder = encoder
         def forward(self, x):
-            # Get hooks for attention weights
-            attn_maps = []
-            def hook_fn(module, input, output):
-                if hasattr(module, 'attn_output_weights'):
-                    attn_maps.append(module.attn_output_weights.detach().cpu())
-            handles = []
-            for layer in self.encoder.transformer_encoder.layers:
-                handles.append(layer.self_attn.register_forward_hook(hook_fn))
-            out = self.encoder(x)
-            for h in handles:
-                h.remove()
+            # Directly use the encoder's output and attention maps
+            out, attn_maps = self.encoder(x)
             # attn_maps: list of (batch, num_heads, seq, seq)
             # For utilities.py, flatten heads: (batch, seq, seq) per map
-            flat_maps = [m.mean(1, keepdim=True) for m in attn_maps]  # mean over heads
+            flat_maps = [m.mean(1, keepdim=True) for m in attn_maps] if attn_maps else []
             return out, flat_maps
 
     encoder_with_attn = EncoderWithAttn(encoder)
