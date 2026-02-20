@@ -9,19 +9,47 @@ n_head = 2   # Number of attention heads
 n_layer = 4  # Number of transformer layers
 
 # Transformer Decoder for Part 2
+
+# Custom Decoder Layer to extract attention weights
+class CustomTransformerDecoderLayer(nn.TransformerDecoderLayer):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.self_attn_weights = None
+
+	def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
+				tgt_key_padding_mask=None, memory_key_padding_mask=None):
+		# Self-attention
+		tgt2, attn_weights = self.self_attn(
+			tgt, tgt, tgt,
+			attn_mask=tgt_mask,
+			key_padding_mask=tgt_key_padding_mask,
+			need_weights=True,
+			average_attn_weights=False
+		)
+		self.self_attn_weights = attn_weights  # (batch, num_heads, seq, seq)
+		tgt = tgt + self.dropout1(tgt2)
+		tgt = self.norm1(tgt)
+		# Cross-attention (not used here, memory is zeros)
+		tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+		tgt = tgt + self.dropout2(tgt2)
+		tgt = self.norm2(tgt)
+		return tgt
+
 class TransformerDecoder(nn.Module):
 	def __init__(self, vocab_size, n_embd=n_embd, n_head=n_head, n_layer=n_layer, max_seq_len=32, ff_hidden_dim=100):
 		super().__init__()
 		self.token_emb = nn.Embedding(vocab_size, n_embd)
 		self.pos_emb = nn.Embedding(max_seq_len, n_embd)
-		decoder_layer = nn.TransformerDecoderLayer(
-			d_model=n_embd,
-			nhead=n_head,
-			dim_feedforward=ff_hidden_dim,
-			activation='relu',
-			batch_first=True
-		)
-		self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=n_layer)
+		decoder_layers = nn.ModuleList([
+			CustomTransformerDecoderLayer(
+				d_model=n_embd,
+				nhead=n_head,
+				dim_feedforward=ff_hidden_dim,
+				activation='relu',
+				batch_first=True
+			) for _ in range(n_layer)
+		])
+		self.decoder_layers = decoder_layers
 		self.n_embd = n_embd
 		self.max_seq_len = max_seq_len
 		self.lm_head = nn.Linear(n_embd, vocab_size)
@@ -32,25 +60,30 @@ class TransformerDecoder(nn.Module):
 		mask = mask.masked_fill(mask == 1, float('-inf'))
 		return mask
 
-	def forward(self, x, targets=None):
+	def forward(self, x, targets=None, return_attn=False):
 		# x: (batch_size, seq_len)
+		attn_maps = []
 		batch_size, seq_len = x.size()
 		positions = torch.arange(0, seq_len, device=x.device).unsqueeze(0).expand(batch_size, seq_len)
 		tok_emb = self.token_emb(x)
 		pos_emb = self.pos_emb(positions)
 		h = tok_emb + pos_emb
-		# Masked self-attention
 		tgt_mask = self.generate_square_subsequent_mask(seq_len).to(x.device)
-		# No encoder input, so use zeros as memory
 		memory = torch.zeros(batch_size, seq_len, self.n_embd, device=x.device)
-		out = self.transformer_decoder(h, memory, tgt_mask=tgt_mask)
-		logits = self.lm_head(out)
+		for layer in self.decoder_layers:
+			h = layer(h, memory, tgt_mask=tgt_mask)
+			if hasattr(layer, 'self_attn_weights') and layer.self_attn_weights is not None:
+				attn_maps.append(layer.self_attn_weights.detach().cpu())
+		logits = self.lm_head(h)
 		if targets is not None:
-			# Shift logits and targets for language modeling
 			logits = logits[:, :-1, :].contiguous()
 			targets = targets[:, 1:].contiguous()
 			loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=0)
+			if return_attn:
+				return loss, attn_maps
 			return loss
+		if return_attn:
+			return logits, attn_maps
 		return logits
 
 # Hyperparameters (should match those in main.py)

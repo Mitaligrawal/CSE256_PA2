@@ -1,5 +1,7 @@
 from utilities import Utilities
+import sys
 from transformer import TransformerEncoder
+# from transformer import AliBiTransformerEncoder, SparseAttentionEncoder, ... (add your custom encoders here)
 from tokenizer import SimpleTokenizer
 import torch
 
@@ -11,10 +13,24 @@ if __name__ == "__main__":
     ]
     block_size = 32
 
+
     # Load tokenizer and encoder as in main.py
     texts = [sentences[0] + " " + sentences[1]]  # Just to build vocab
     tokenizer = SimpleTokenizer(' '.join(texts))
-    encoder = TransformerEncoder(tokenizer.vocab_size, max_seq_len=block_size)
+
+    # Select encoder based on command-line argument
+    encoder_type = "part1"
+    if len(sys.argv) > 1:
+        encoder_type = sys.argv[1].lower()
+
+    if encoder_type == "part3":
+        print("Using custom encoder for part 3 (replace with your architecture)")
+        # Replace the next line with your custom encoder, e.g. AliBiTransformerEncoder
+        # encoder = AliBiTransformerEncoder(tokenizer.vocab_size, max_seq_len=block_size)
+        encoder = TransformerEncoder(tokenizer.vocab_size, max_seq_len=block_size)  # Placeholder: update as needed
+    else:
+        print("Using standard TransformerEncoder (part 1)")
+        encoder = TransformerEncoder(tokenizer.vocab_size, max_seq_len=block_size)
 
     # Patch encoder to return attention maps for utilities.py compatibility
     class EncoderWithAttn(torch.nn.Module):
