@@ -2,6 +2,18 @@
 
 The entire project is controlled through a single entry point, `main.py`. Pass a part argument to select which experiment to run.
 
+## Summary
+
+For Part 1 , run :
+python main.py 
+
+For Part 2 , run :
+python main.py part2
+
+For Part 3 , run :
+python main.py part3
+
+
 ### Part 1 — Encoder + Classifier (default)
 
 Trains a `TransformerEncoder` end-to-end with a feedforward classifier to identify which of three politicians (Obama, W. Bush, H. Bush) gave a speech. Trains for 15 epochs and reports train/test accuracy each epoch.
