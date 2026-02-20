@@ -73,9 +73,10 @@ def compute_classifier_accuracy(encoder, classifier, data_loader):
     with torch.no_grad():
         for X, Y in data_loader:
             X, Y = X.to(device), Y.to(device)
-            emb = encoder(X)                        # (batch_size, seq_len, n_embd)
-            mask = (X != 0).float()                 # (batch_size, seq_len)
-            pooled = encoder.mean_pool(emb, mask)   # (batch_size, n_embd)
+            out = encoder(X)
+            emb = out[0] if isinstance(out, tuple) else out  # (batch_size, seq_len, n_embd)
+            mask = (X != 0).float()                          # (batch_size, seq_len)
+            pooled = encoder.mean_pool(emb, mask)            # (batch_size, n_embd)
             outputs = classifier(pooled)            # (batch_size, n_output)
             _, predicted = torch.max(outputs.data, 1)
             total_correct += (predicted == Y).sum().item()
@@ -142,7 +143,7 @@ def main():
             xb, yb = xb.to(device), yb.to(device)
 
             # Forward pass through encoder
-            emb = encoder(xb)                        # (batch_size, seq_len, n_embd)
+            emb, _ = encoder(xb)                     # (batch_size, seq_len, n_embd)
             mask = (xb != 0).float()                 # (batch_size, seq_len)
             pooled = encoder.mean_pool(emb, mask)    # (batch_size, n_embd)
 
@@ -182,7 +183,66 @@ def main():
 import sys
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "part2":
+    if len(sys.argv) > 1 and sys.argv[1] == "part3":
+        print("Running Part 3: Architectural Exploration (ALiBi + Local Window Attention)")
+        from transformer import ALiBiTransformerEncoder
+
+        # ── Data & tokenizer ──────────────────────────────────────────────────
+        texts = load_texts('speechesdataset')
+        tokenizer = SimpleTokenizer(' '.join(texts))
+        print("Vocabulary size is", tokenizer.vocab_size)
+
+        train_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/train_CLS.tsv")
+        train_CLS_loader  = DataLoader(train_CLS_dataset, batch_size=batch_size,
+                                       collate_fn=collate_batch, shuffle=True)
+        test_CLS_dataset  = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
+        test_CLS_loader   = DataLoader(test_CLS_dataset, batch_size=batch_size,
+                                       collate_fn=collate_batch, shuffle=False)
+
+        # ── ALiBi encoder (full attention, no learned positional embedding) ───
+        # To use local-window attention instead, pass window=8 (or any int).
+        encoder    = ALiBiTransformerEncoder(
+            tokenizer.vocab_size, n_embd=n_embd, n_head=n_head,
+            n_layer=n_layer, max_seq_len=block_size, window=None
+        ).to(device)
+        classifier = FeedforwardClassifier(n_input=n_embd, n_hidden=n_hidden,
+                                           n_output=n_output).to(device)
+
+        n_params = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+        print(f"Number of parameters in ALiBi encoder: {n_params}")
+
+        optimizer = torch.optim.Adam(
+            list(encoder.parameters()) + list(classifier.parameters()), lr=learning_rate
+        )
+        criterion = torch.nn.CrossEntropyLoss()
+
+        # ── Classification training ───────────────────────────────────────────
+        print("Training ALiBi encoder + classifier...")
+        test_accuracies = []
+        for epoch in range(epochs_CLS):
+            total_loss = 0.0
+            for xb, yb in train_CLS_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                emb, _  = encoder(xb)
+                mask    = (xb != 0).float()
+                pooled  = encoder.mean_pool(emb, mask)
+                logits  = classifier(pooled)
+                loss    = criterion(logits, yb)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+
+            avg_loss = total_loss / len(train_CLS_loader)
+            train_acc = compute_classifier_accuracy(encoder, classifier, train_CLS_loader)
+            test_acc  = compute_classifier_accuracy(encoder, classifier, test_CLS_loader)
+            test_accuracies.append(test_acc)
+            print(f"Epoch {epoch+1}/{epochs_CLS} | Loss: {avg_loss:.4f} | "
+                  f"Train Acc: {train_acc:.2f}% | Test Acc: {test_acc:.2f}%")
+
+        print(f"\nFinal Test Accuracy (ALiBi): {test_accuracies[-1]:.2f}%")
+
+    elif len(sys.argv) > 1 and sys.argv[1] == "part2":
         print("Running Part 2: Decoder Implementation")
         from transformer import TransformerDecoder
 

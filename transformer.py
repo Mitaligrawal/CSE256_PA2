@@ -1,4 +1,3 @@
-
 # Implementation of a Transformer Encoder and Decoder using PyTorch
 import torch
 import torch.nn as nn
@@ -105,3 +104,125 @@ class TransformerEncoder(nn.Module):
 			summed = (x * mask).sum(dim=1)
 			counts = mask.sum(dim=1).clamp(min=1)
 			return summed / counts
+
+
+# =============================================================================
+# Part 3: Architectural Exploration — ALiBi + Local Window Attention
+# =============================================================================
+import math
+
+def _get_alibi_slopes(n_heads):
+	"""Compute head-specific ALiBi slopes (Press et al., 2022)."""
+	def _pow2_slopes(n):
+		start = 2 ** (-(2 ** -(math.log2(n) - 3)))
+		return [start * (start ** i) for i in range(n)]
+
+	if math.log2(n_heads) % 1 == 0:
+		return torch.tensor(_pow2_slopes(n_heads))
+	closest = 2 ** math.floor(math.log2(n_heads))
+	base  = _pow2_slopes(closest)
+	extra = _pow2_slopes(2 * closest)[0::2][: n_heads - closest]
+	return torch.tensor(base + extra)
+
+
+def _alibi_bias(seq_len, n_heads, device):
+	"""Returns ALiBi bias of shape (n_heads, seq_len, seq_len)."""
+	slopes = _get_alibi_slopes(n_heads).to(device)        # (H,)
+	pos    = torch.arange(seq_len, device=device)
+	dist   = (pos.unsqueeze(0) - pos.unsqueeze(1)).abs()  # (T, T)
+	return -slopes.view(n_heads, 1, 1) * dist.float()     # (H, T, T)
+
+
+def _window_mask(seq_len, window, device):
+	"""Additive mask: 0 inside window, -inf outside."""
+	pos  = torch.arange(seq_len, device=device)
+	dist = (pos.unsqueeze(0) - pos.unsqueeze(1)).abs()
+	mask = torch.zeros(seq_len, seq_len, device=device)
+	mask[dist > window // 2] = float('-inf')
+	return mask                                            # (T, T)
+
+
+class _ALiBiMHA(nn.Module):
+	"""Multi-head attention with ALiBi bias and optional local-window mask."""
+	def __init__(self, d_model, n_heads, window=None, dropout=0.1):
+		super().__init__()
+		self.H, self.d_k = n_heads, d_model // n_heads
+		self.window = window
+		self.W_q = nn.Linear(d_model, d_model, bias=False)
+		self.W_k = nn.Linear(d_model, d_model, bias=False)
+		self.W_v = nn.Linear(d_model, d_model, bias=False)
+		self.W_o = nn.Linear(d_model, d_model, bias=False)
+		self.drop = nn.Dropout(dropout)
+
+	def forward(self, x, pad_mask=None):
+		B, T, D = x.shape
+		H, d_k  = self.H, self.d_k
+		def proj(W): return W(x).view(B, T, H, d_k).transpose(1, 2)
+		Q, K, V = proj(self.W_q), proj(self.W_k), proj(self.W_v)
+
+		scores = (Q @ K.transpose(-2, -1)) / math.sqrt(d_k)           # (B,H,T,T)
+		scores = scores + _alibi_bias(T, H, x.device).unsqueeze(0)     # ALiBi
+		if self.window is not None:
+			scores = scores + _window_mask(T, self.window, x.device)   # local window
+		if pad_mask is not None:
+			scores = scores.masked_fill(pad_mask[:, None, None, :], float('-inf'))
+
+		attn = self.drop(torch.softmax(scores, dim=-1))
+		out  = (attn @ V).transpose(1, 2).contiguous().view(B, T, D)
+		return self.W_o(out), attn.detach()
+
+
+class _ALiBiLayer(nn.Module):
+	def __init__(self, d_model, n_heads, ff_dim, window=None, dropout=0.1):
+		super().__init__()
+		self.attn  = _ALiBiMHA(d_model, n_heads, window=window, dropout=dropout)
+		self.ff    = nn.Sequential(
+			nn.Linear(d_model, ff_dim), nn.GELU(),
+			nn.Linear(ff_dim, d_model), nn.Dropout(dropout),
+		)
+		self.norm1 = nn.LayerNorm(d_model)
+		self.norm2 = nn.LayerNorm(d_model)
+		self.drop  = nn.Dropout(dropout)
+
+	def forward(self, x, pad_mask=None):
+		a, w = self.attn(x, pad_mask=pad_mask)
+		x = self.norm1(x + self.drop(a))
+		x = self.norm2(x + self.ff(x))
+		return x, w
+
+
+class ALiBiTransformerEncoder(nn.Module):
+	"""
+	Drop-in replacement for TransformerEncoder using:
+	  • ALiBi positional bias  (no learned pos embedding)
+	  • Optional local-window attention  (window kwarg, None = full attention)
+
+	API identical to TransformerEncoder: forward(x) -> (out, attn_maps)
+	                                     mean_pool(x, mask) -> pooled
+	"""
+	def __init__(self, vocab_size, n_embd=64, n_head=2, n_layer=4,
+	             max_seq_len=32, window=None, dropout=0.1):
+		super().__init__()
+		self.token_emb = nn.Embedding(vocab_size, n_embd)   # no pos_emb!
+		self.layers    = nn.ModuleList([
+			_ALiBiLayer(n_embd, n_head, 4 * n_embd, window=window, dropout=dropout)
+			for _ in range(n_layer)
+		])
+		self.norm   = nn.LayerNorm(n_embd)
+		self.n_embd = n_embd
+		self.attn_maps = []
+
+	def forward(self, x):
+		self.attn_maps = []
+		pad_mask = (x == 0)                   # True for <pad> tokens
+		h = self.token_emb(x)                 # (B, T, n_embd) — no pos embedding
+		for layer in self.layers:
+			h, aw = layer(h, pad_mask=pad_mask)
+			self.attn_maps.append(aw)
+		return self.norm(h), self.attn_maps
+
+	def mean_pool(self, x, mask=None):
+		if mask is None:
+			return x.mean(dim=1)
+		mask = mask.unsqueeze(-1)
+		return (x * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
