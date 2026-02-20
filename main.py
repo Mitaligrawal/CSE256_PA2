@@ -1,8 +1,9 @@
+
+import sys
 import torch
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import os
-
 from tokenizer import SimpleTokenizer
 from dataset import SpeechesClassificationDataset, LanguageModelingDataset
 from transformer import TransformerEncoder
@@ -95,7 +96,8 @@ def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
         X, Y = X.to(device), Y.to(device)
         loss = decoderLMmodel(X, Y) # your model should be computing the cross entropy loss
         losses.append(loss.item())
-        if len(losses) >= eval_iters: break
+        if len(losses) >= eval_iters:
+            break
 
     losses = torch.tensor(losses)
     mean_loss = losses.mean()
@@ -176,5 +178,77 @@ def main():
         # LM training code here
 
 
+
+import sys
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "part2":
+        print("Running Part 2: Decoder Implementation")
+        from transformer import TransformerDecoder
+
+        # Load data and tokenizer
+        texts = load_texts('speechesdataset')
+        tokenizer = SimpleTokenizer(' '.join(texts))
+        print("Vocabulary size is", tokenizer.vocab_size)
+
+        inputfile = "speechesdataset/train_LM.txt"
+        with open(inputfile, 'r', encoding='utf-8') as f:
+            lmtrainText = f.read()
+        train_LM_dataset = LanguageModelingDataset(tokenizer, lmtrainText, block_size)
+        train_LM_loader = DataLoader(train_LM_dataset, batch_size=batch_size, shuffle=True)
+
+
+        # Test sets for LM
+        test_files = {
+            'Obama': "speechesdataset/test_LM_obama.txt",
+            'W. Bush': "speechesdataset/test_LM_wbush.txt",
+            'H. Bush': "speechesdataset/test_LM_hbush.txt"
+        }
+        test_LM_loaders = {}
+        for name, file in test_files.items():
+            with open(file, 'r', encoding='utf-8') as f:
+                lmtestText = f.read()
+            test_LM_dataset = LanguageModelingDataset(tokenizer, lmtestText, block_size)
+            test_LM_loaders[name] = DataLoader(test_LM_dataset, batch_size=batch_size, shuffle=False)
+
+
+        # Initialize decoder
+        decoder = TransformerDecoder(
+            tokenizer.vocab_size,
+            n_embd=n_embd,
+            n_head=n_head,
+            n_layer=n_layer,
+            max_seq_len=block_size,
+            ff_hidden_dim=100
+        ).to(device)
+        optimizer = torch.optim.Adam(decoder.parameters(), lr=learning_rate)
+
+        # Report number of parameters in decoder
+        n_decoder_params = sum(p.numel() for p in decoder.parameters() if p.requires_grad)
+        print(f"Number of parameters in decoder: {n_decoder_params}")
+
+        # Training loop for decoder
+        print("Training decoder...")
+        for i, (xb, yb) in enumerate(train_LM_loader):
+            if i >= max_iters:
+                break
+            xb, yb = xb.to(device), yb.to(device)
+            loss = decoder(xb, yb)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if (i+1) % eval_interval == 0:
+                train_ppl = compute_perplexity(decoder, train_LM_loader, eval_iters)
+                print(f"Iter {i+1}: Train Perplexity {train_ppl:.2f}")
+                for name, loader in test_LM_loaders.items():
+                    test_ppl = compute_perplexity(decoder, loader, eval_iters)
+                    print(f"Iter {i+1}: Test Perplexity ({name}): {test_ppl:.2f}")
+
+        # Final evaluation
+        final_train_ppl = compute_perplexity(decoder, train_LM_loader, eval_iters)
+        print(f"Final Train Perplexity: {final_train_ppl:.2f}")
+        for name, loader in test_LM_loaders.items():
+            final_test_ppl = compute_perplexity(decoder, loader, eval_iters)
+            print(f"Final Test Perplexity ({name}): {final_test_ppl:.2f}")
+    else:
+        main()
